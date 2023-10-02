@@ -188,15 +188,3 @@ class TestModelSerializerAsyncCon(TransactionTestCase):
         obj = await serializer(data=data).aupdate({'id': 1, foreign_key_name: 1})
         obj_from_query = await self._main_model.objects.aget(id=data['id'])
         self.assertIsInstance(obj_rel, self._relation_model)
-        try:
-            obj = await serializer(data=data).aupdate({'id': 1, foreign_key_name: self._test_str})
-        except ValueError:
-            pass
-        else:
-            raise AssertionError('The relations type check is not working.')
-        try:
-            obj = await serializer(data=data).aupdate({'id': 1, foreign_key_name: obj})
-        except ValueError:
-            pass
-        else:
-            raise AssertionError('The relations type check is not working.')

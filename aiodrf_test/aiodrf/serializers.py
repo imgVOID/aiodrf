@@ -287,20 +287,9 @@ class ModelSerializerAsync(ModelSerializer):
         info = await sync_to_async(model_meta.get_field_info)(ModelClass)
         for data in validated_data:
             for field_name, relation_info in info.relations.items():
-                if relation_info.to_many and (field_name in data):
-                    data.pop(field_name)
-                elif (field_name in data):
-                    try:
-                        rel_val = data.pop(field_name)
-                    except (KeyError, IndexError):
-                        rel_val = None
-                    else:
-                        if isinstance(rel_val, relation_info.related_model):
-                            rel_val = rel_val.id
-                    if rel_val is None or type(rel_val) is int:
-                        data[field_name + '_id'] = rel_val
-                    else:
-                        raise ValueError('Relation field value\'s type is not correct.')
+                rel_data = data.pop(field_name, None)
+                if not relation_info.to_many:
+                    data[field_name + '_id'] = rel_data
         keys = list(key for key in validated_data[0].keys() if key != 'id')
         values = list(list(data[key] for key in keys) for data in validated_data)
         con_params = connection.get_connection_params()
@@ -329,32 +318,24 @@ class ModelSerializerAsync(ModelSerializer):
         table_name = f'{ModelClass._meta.app_label}_{ModelClass.__name__.lower()}'
         info = await sync_to_async(model_meta.get_field_info)(ModelClass)
         for field_name, relation_info in info.relations.items():
-            if relation_info.to_many and (field_name in validated_data):
-                validated_data.pop(field_name)
-            elif (field_name in validated_data):
-                rel_val = validated_data.pop(field_name)
-                if isinstance(rel_val, relation_info.related_model):
-                    rel_val = rel_val.id
-                if rel_val is None or type(rel_val) is int:
-                    validated_data[field_name + '_id'] = rel_val
-                else:
-                    raise ValueError('Relation field value\'s type is not correct.')
-        keys = list(validated_data.keys())
-        values = list(validated_data[key] for key in keys)
+            rel_data = validated_data.pop(field_name, None)
+            if not relation_info.to_many:
+                validated_data[field_name + '_id'] = rel_data
         con_params = connection.get_connection_params()
-        con_params.pop('cursor_factory')
+        con_params.pop('cursor_factory', None)
         async with await psycopg.AsyncConnection.connect(**con_params) as aconn:
             async with aconn.cursor() as cur:
+                sql_set_str = " = %s, ".join(validated_data.keys()) + " = %s"
+                sql_where_str = f'WHERE ID = {validated_data["id"]}'
                 try:
                     await cur.execute(
-                        f'UPDATE {table_name} SET {" = %s, ".join(keys + [""])} WHERE ID = {values[0]}'.replace(',  WHERE', ' WHERE'),
-                        values
+                        f'UPDATE {table_name} SET {sql_set_str} {sql_where_str}',
+                        list(validated_data.values())
                     )
-                    await cur.execute(f'SELECT * FROM {table_name} WHERE ID  = {values[0]}')
-                except psycopg.OperationalError:
-                    raise psycopg.OperationalError(f'The {table_name} table have not been modified.')
+                    await cur.execute(f'SELECT * FROM {table_name} {sql_where_str}')
+                except psycopg.OperationalError as e:
+                    raise psycopg.OperationalError(
+                        f'The {table_name} table have not been modified.'
+                    ) from e
                 else:
-                    row = await cur.fetchall()
-                    row = [ModelClass(*obj) for obj in sorted(row)]
-                    row = row.pop() if len(row) == 1 else row
-                    return row
+                    return ModelClass(*await cur.fetchone())
