@@ -15,6 +15,21 @@
        }
     },
     {
+       "model":"aiodrf.testincluded",
+       "pk":2,
+       "fields":{
+          "text_included":"test",
+          "int_included":2,
+          "bool_included":true,
+          "choice_int_included":2,
+          "choice_str_included":"USA",
+          "foreign_key_included":null,
+          "many_to_many_included":[
+             
+          ]
+       }
+    },
+    {
        "model":"aiodrf.test",
        "pk":1,
        "fields":{
@@ -23,7 +38,7 @@
           "bool":false,
           "choice_int":1,
           "choice_str":"UK",
-          "foreign_key":1,
+          "foreign_key":null,
           "many_to_many":[
              1
           ]

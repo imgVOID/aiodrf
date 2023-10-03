@@ -279,36 +279,61 @@ class ModelSerializerAsync(ModelSerializer):
             BaseSerializer.is_valid, thread_sensitive=True
         )(self, *args, raise_exception=False)
 
+    # TODO: write the bulk many to many edition functionality
     async def acreate(self, validated_data):
         validated_data = [validated_data] if type(validated_data) == dict else validated_data
         await raise_errors_on_nested_writes('create', self, validated_data)
         ModelClass = self.Meta.model if hasattr(self.Meta, 'model') else self.child.Meta.model
-        table_name = f'{ModelClass._meta.app_label}_{ModelClass.__name__.lower()}'
         info = await sync_to_async(model_meta.get_field_info)(ModelClass)
+        many_to_many = {}
         for data in validated_data:
             for field_name, relation_info in info.relations.items():
                 rel_data = data.pop(field_name, None)
                 if not relation_info.to_many:
                     data[field_name + '_id'] = rel_data
-        keys = list(key for key in validated_data[0].keys() if key != 'id')
-        values = list(list(data[key] for key in keys) for data in validated_data)
+                elif rel_data is not None:
+                    many_to_many[field_name] = [{
+                        relation_info.related_model.__name__.lower() + '_id': x
+                    } for x in rel_data]
         con_params = connection.get_connection_params()
         con_params.pop('cursor_factory')
         async with await psycopg.AsyncConnection.connect(**con_params) as aconn:
             async with aconn.cursor() as cur:
+                table_name = f'{ModelClass._meta.app_label}_{ModelClass.__name__.lower()}'
+                keys = list(key for key in validated_data[0].keys() if key != 'id')
+                values = list(list(data[key] for key in keys) for data in validated_data)
+                is_many = True if len(values) > 1 else False
+                execute_func = cur.executemany if is_many else cur.execute
                 try:
-                    await cur.executemany(
-                        f'INSERT INTO {table_name} ({", ".join(keys)}) VALUES ({"%s, "*len(keys)})'.replace(', )', ')'), 
-                        values
+                    await execute_func(
+                        f'INSERT INTO {table_name} ({", ".join(keys)}) VALUES '
+                        f'({"".join(("%s, "*len(keys)).rsplit(", ", 1))}) RETURNING *;',
+                        values if is_many else values[0]
                     )
+                except psycopg.OperationalError as e:
+                    raise psycopg.OperationalError(
+                        f'The {table_name} table has not been modified.'
+                    ) from e
+                if is_many:
                     await cur.execute(f'SELECT * FROM {table_name} ORDER BY ID DESC LIMIT {len(values)}')
-                except psycopg.OperationalError:
-                    raise psycopg.OperationalError(f'The {table_name} table have not been modified.')
-                else:
-                    row = await cur.fetchall()
-                    row = [ModelClass(*obj) for obj in sorted(row)]
-                    row = row.pop() if len(row) == 1 else row
-                    return row
+                    return [ModelClass(*obj) for obj in sorted(await cur.fetchall())]
+                result = ModelClass(*await cur.fetchone())
+                for key, val in many_to_many.items():
+                    for x in val:
+                        x[ModelClass.__name__.lower() + '_id'] = result.id
+                    table_name_many = f'{ModelClass._meta.app_label}_{ModelClass.__name__.lower()}_{key}'
+                    if val:
+                        try:
+                            await cur.executemany(
+                                f'INSERT INTO {table_name_many} ({", ".join(val[0].keys())}) '
+                                f'VALUES ({"".join(("%s, " * len(val[0].keys())).rsplit(", ", 1))})',
+                                [list(x.values()) for x in many_to_many[key]]
+                            )
+                        except psycopg.OperationalError as e:
+                            raise psycopg.OperationalError(
+                                f'The {table_name} table has not been modified.'
+                            ) from e
+                return result
 
     async def aupdate(self, validated_data):
         if 'id' not in validated_data:
@@ -317,25 +342,39 @@ class ModelSerializerAsync(ModelSerializer):
         ModelClass = self.Meta.model
         table_name = f'{ModelClass._meta.app_label}_{ModelClass.__name__.lower()}'
         info = await sync_to_async(model_meta.get_field_info)(ModelClass)
+        many_to_many = {}
         for field_name, relation_info in info.relations.items():
             rel_data = validated_data.pop(field_name, None)
             if not relation_info.to_many:
                 validated_data[field_name + '_id'] = rel_data
+            elif rel_data is not None:
+                many_to_many[field_name] = [{
+                    ModelClass.__name__.lower() + '_id': validated_data['id'],
+                    relation_info.related_model.__name__.lower() + '_id': x
+                } for x in rel_data]
         con_params = connection.get_connection_params()
         con_params.pop('cursor_factory', None)
         async with await psycopg.AsyncConnection.connect(**con_params) as aconn:
             async with aconn.cursor() as cur:
-                sql_set_str = " = %s, ".join(validated_data.keys()) + " = %s"
-                sql_where_str = f'WHERE ID = {validated_data["id"]}'
                 try:
+                    for key, val in many_to_many.items():
+                        table_name_many = f'{ModelClass._meta.app_label}_{ModelClass.__name__.lower()}_{key}'
+                        await cur.execute(f'DELETE FROM {table_name_many};')
+                        if val:
+                            await cur.executemany(
+                                f'INSERT INTO {table_name_many} ({", ".join(val[0].keys())}) '
+                                f'VALUES ({"".join(("%s, " * len(val[0].keys())).rsplit(", ", 1))})',
+                                [list(x.values()) for x in many_to_many[key]]
+                            )
                     await cur.execute(
-                        f'UPDATE {table_name} SET {sql_set_str} {sql_where_str}',
+                        f'UPDATE {table_name} SET '
+                        f'{" = %s, ".join(validated_data.keys())} = %s '
+                        f'WHERE ID = {validated_data["id"]} RETURNING *;',
                         list(validated_data.values())
                     )
-                    await cur.execute(f'SELECT * FROM {table_name} {sql_where_str}')
                 except psycopg.OperationalError as e:
                     raise psycopg.OperationalError(
-                        f'The {table_name} table have not been modified.'
+                        f'The {table_name} table has not been modified.'
                     ) from e
                 else:
                     return ModelClass(*await cur.fetchone())
