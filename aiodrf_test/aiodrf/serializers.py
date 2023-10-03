@@ -1,14 +1,13 @@
 from psycopg import AsyncConnection, OperationalError
+from django.db import connection
 from traceback import format_exc
+from asgiref.sync import sync_to_async
+
 from rest_framework.serializers import BaseSerializer, ListSerializer, ModelSerializer
 from rest_framework.utils import model_meta
 from rest_framework.exceptions import ErrorDetail, ValidationError
 from rest_framework.utils.serializer_helpers import (ReturnDict, ReturnList)
 from rest_framework.settings import api_settings
-from asgiref.sync import sync_to_async
-
-
-from django.db import connection
 
 setattr, getattr = sync_to_async(setattr), sync_to_async(getattr)
 
@@ -18,7 +17,7 @@ async def raise_errors_on_nested_writes(method_name, serializer, validated_data)
         ModelClass = serializer.Meta.model
     except AttributeError:
         ModelClass = serializer.child.Meta.model
-    model_field_info = await sync_to_async(model_meta.get_field_info, thread_sensitive=True)(ModelClass)
+    model_field_info = await sync_to_async(model_meta.get_field_info)(ModelClass)
     try:
         writable_fields = serializer._writable_fields
     except AttributeError:
@@ -67,10 +66,11 @@ class ListSerializerAsync(ListSerializer):
             "`.update()` so you can specify the behavior exactly."
         )
     
+    async def aupdate(self, instance, validated_data):
+        return await self.update(instance, validated_data)
+    
     async def create(self, validated_data):
-        return [
-            await self.child.create(attrs) for attrs in validated_data
-        ]
+        return [await self.child.create(attrs) for attrs in validated_data]
     
     async def acreate(self, validated_data):
         return await self.child.acreate(validated_data)
@@ -88,17 +88,11 @@ class ListSerializerAsync(ListSerializer):
             raise AssertionError(msg)
         if not hasattr(self, '_data'):
             if self.instance is not None and not await getattr(self, '_errors', None):
-                self._data = await sync_to_async(
-                    self.to_representation, thread_sensitive=True
-                )(self.instance)
+                self._data = await sync_to_async(self.to_representation)(self.instance)
             elif hasattr(self, '_validated_data') and not await getattr(self, '_errors', None):
-                self._data = await sync_to_async(
-                    self.to_representation, thread_sensitive=True
-                )(self.validated_data)
+                self._data = await sync_to_async(self.to_representation)(self.validated_data)
             else:
-                self._data = await sync_to_async(
-                    self.get_initial, thread_sensitive=True
-                )()
+                self._data = await sync_to_async(self.get_initial)()
         return ReturnList(self._data, serializer=self)
     
     @property
@@ -123,7 +117,7 @@ class ListSerializerAsync(ListSerializer):
         if not hasattr(self, '_validated_data'):
             try:
                 self._validated_data = await sync_to_async(
-                    self.run_validation, thread_sensitive=True
+                    self.run_validation
                 )(self.initial_data)
             except ValidationError as exc:
                 self._validated_data = []
@@ -211,7 +205,7 @@ class ModelSerializerAsync(ModelSerializer):
 
     async def update(self, instance, validated_data):
         await raise_errors_on_nested_writes('update', self, validated_data)
-        info = await sync_to_async(model_meta.get_field_info, thread_sensitive=True)(instance)
+        info = await sync_to_async(model_meta.get_field_info)(instance)
 
         m2m_fields = []
         for attr, value in validated_data.items():
@@ -242,17 +236,11 @@ class ModelSerializerAsync(ModelSerializer):
 
         if not hasattr(self, '_data'):
             if self.instance is not None and not await getattr(self, '_errors', None):
-                self._data = await sync_to_async(
-                    self.to_representation, thread_sensitive=True
-                )(self.instance)
+                self._data = await sync_to_async(self.to_representation)(self.instance)
             elif hasattr(self, '_validated_data') and not await getattr(self, '_errors', None):
-                self._data = await sync_to_async(
-                    self.to_representation, thread_sensitive=True
-                )(self.validated_data)
+                self._data = await sync_to_async(self.to_representation)(self.validated_data)
             else:
-                self._data = await sync_to_async(
-                    self.get_initial, thread_sensitive=True
-                )()
+                self._data = await sync_to_async(self.get_initial)()
         return self._data
 
     @property
@@ -270,9 +258,7 @@ class ModelSerializerAsync(ModelSerializer):
         return self._validated_data
     
     async def is_valid(self, *args, raise_exception=False):
-        await sync_to_async(
-            BaseSerializer.is_valid, thread_sensitive=True
-        )(self, *args, raise_exception=False)
+        await sync_to_async(BaseSerializer.is_valid)(self, *args, raise_exception=False)
 
     # TODO: write the bulk many to many edition functionality
     async def acreate(self, validated_data):
