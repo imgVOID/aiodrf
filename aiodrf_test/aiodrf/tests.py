@@ -1,16 +1,11 @@
-import sys
-from re import findall
-from django.test import TestCase, TransactionTestCase
-from django.test.client import RequestFactory
+from sys import platform
+from asyncio import WindowsSelectorEventLoopPolicy, set_event_loop_policy
 from asgiref.sync import sync_to_async
+from django.test import TestCase, TransactionTestCase
 
-from .models import Test, TestIncluded, TestIncludedRelation, TestDirectCon
-from .serializers import ModelSerializerAsync, ListSerializerAsync
-from .helpers import get_type_from_model
+from .models import Test, TestIncluded
+from .serializers import ModelSerializerAsync
 
-from django.core import serializers
-
-import asyncio
 
 class TestModelSerializer(TestCase):
     fixtures = ['test_model_fixture.json']
@@ -24,8 +19,8 @@ class TestModelSerializer(TestCase):
     
     @classmethod
     def setUp(cls):
-        if sys.platform:
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        if platform == 'win32':
+            set_event_loop_policy(WindowsSelectorEventLoopPolicy())
     
     @classmethod
     async def _get_serializer(cls):
@@ -72,10 +67,10 @@ class TestModelSerializer(TestCase):
         data = await serializer(obj).data
         data[self._text_name] = self._test_str 
         data[self._foreign_key_name] = await self._relation_query.afirst()
-        del data['id']
-        serializer = serializer(data=data)
+        serializer, id = serializer(data=data), data.pop('id')
         await serializer.is_valid()
         obj = await serializer.create(await serializer.data)
+        self.assertGreater(obj.id, id)
         self.assertIsInstance(
             obj.foreign_key, self._main_model.foreign_key.field.related_model
         )
@@ -119,7 +114,7 @@ class TestModelSerializer(TestCase):
         [self.assertEqual(await sync_to_async(getattr)(obj_updated, key), data[key]) for key in data.keys()]
 
 
-class TestModelSerializerAsyncCon(TransactionTestCase):
+class TestModelSerializerAsyncDbCon(TransactionTestCase):
     fixtures = ['test_model_fixture.json']
     _main_model, _relation_model = Test, TestIncluded
     _main_query = _main_model.objects.all()
@@ -146,7 +141,6 @@ class TestModelSerializerAsyncCon(TransactionTestCase):
         self.assertIsInstance(await self._main_model.objects.aget(id=obj.id), 
                               self._main_model)
 
-    # TODO: test many to many
     async def test_acreate_list(self):
         # Doesn't create a many to many relationship.
         objs = [obj async for obj in self._main_query.all()]
@@ -162,7 +156,6 @@ class TestModelSerializerAsyncCon(TransactionTestCase):
 
     # TODO: test many to many
     async def test_aupdate(self):
-        # Can create a many to many relationship.
         foreign_key_name = self._foreign_key_name
         obj = await self._main_query.afirst()
         serializer = await self._get_serializer()
