@@ -1,16 +1,11 @@
-import traceback
-import psycopg
-import asyncio
-from django.core.exceptions import ObjectDoesNotExist
-from rest_framework.serializers import ModelSerializer, BaseSerializer, ListSerializer
-from rest_framework.utils import html, model_meta, representation
+from psycopg import AsyncConnection, OperationalError
+from traceback import format_exc
+from rest_framework.serializers import BaseSerializer, ListSerializer, ModelSerializer
+from rest_framework.utils import model_meta
 from rest_framework.exceptions import ErrorDetail, ValidationError
-from rest_framework.utils.serializer_helpers import (
-    ReturnDict, ReturnList
-)
+from rest_framework.utils.serializer_helpers import (ReturnDict, ReturnList)
 from rest_framework.settings import api_settings
 from asgiref.sync import sync_to_async
-from .models import TestDirectCon, TestIncluded
 
 
 from django.db import connection
@@ -60,6 +55,7 @@ async def raise_errors_on_nested_writes(method_name, serializer, validated_data)
             class_name=serializer.__class__.__name__
         )
     )
+
 
 class ListSerializerAsync(ListSerializer):
     async def update(self, instance, validated_data):
@@ -141,7 +137,6 @@ class ListSerializerAsync(ListSerializer):
         return not bool(self._errors)
 
 
-
 class ModelSerializerAsync(ModelSerializer):
     class Meta:
         list_serializer_class = ListSerializerAsync
@@ -188,7 +183,7 @@ class ModelSerializerAsync(ModelSerializer):
         try:
             instance = await ModelClass._default_manager.acreate(**validated_data)
         except TypeError:
-            tb = traceback.format_exc()
+            tb = format_exc()
             msg = (
                 'Got a `TypeError` when calling `%s.%s.create()`. '
                 'This may be because you have a writable field on the '
@@ -297,7 +292,7 @@ class ModelSerializerAsync(ModelSerializer):
                     } for x in rel_data]
         con_params = connection.get_connection_params()
         con_params.pop('cursor_factory')
-        async with await psycopg.AsyncConnection.connect(**con_params) as aconn:
+        async with await AsyncConnection.connect(**con_params) as aconn:
             async with aconn.cursor() as cur:
                 table_name = f'{ModelClass._meta.app_label}_{ModelClass.__name__.lower()}'
                 keys = list(key for key in validated_data[0].keys() if key != 'id')
@@ -310,8 +305,8 @@ class ModelSerializerAsync(ModelSerializer):
                         f'({"".join(("%s, "*len(keys)).rsplit(", ", 1))}) RETURNING *;',
                         values if is_many else values[0]
                     )
-                except psycopg.OperationalError as e:
-                    raise psycopg.OperationalError(
+                except OperationalError as e:
+                    raise OperationalError(
                         f'The {table_name} table has not been modified.'
                     ) from e
                 if is_many:
@@ -329,8 +324,8 @@ class ModelSerializerAsync(ModelSerializer):
                                 f'VALUES ({"".join(("%s, " * len(val[0].keys())).rsplit(", ", 1))})',
                                 [list(x.values()) for x in many_to_many[key]]
                             )
-                        except psycopg.OperationalError as e:
-                            raise psycopg.OperationalError(
+                        except OperationalError as e:
+                            raise OperationalError(
                                 f'The {table_name} table has not been modified.'
                             ) from e
                 return result
@@ -354,7 +349,7 @@ class ModelSerializerAsync(ModelSerializer):
                 } for x in rel_data]
         con_params = connection.get_connection_params()
         con_params.pop('cursor_factory', None)
-        async with await psycopg.AsyncConnection.connect(**con_params) as aconn:
+        async with await AsyncConnection.connect(**con_params) as aconn:
             async with aconn.cursor() as cur:
                 try:
                     for key, val in many_to_many.items():
@@ -372,8 +367,8 @@ class ModelSerializerAsync(ModelSerializer):
                         f'WHERE ID = {validated_data["id"]} RETURNING *;',
                         list(validated_data.values())
                     )
-                except psycopg.OperationalError as e:
-                    raise psycopg.OperationalError(
+                except OperationalError as e:
+                    raise OperationalError(
                         f'The {table_name} table has not been modified.'
                     ) from e
                 else:
