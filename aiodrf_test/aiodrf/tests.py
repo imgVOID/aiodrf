@@ -186,3 +186,13 @@ class TestModelSerializerAsyncDbCon(TransactionTestCase):
         obj = await serializer(data=data).aupdate({'id': 1, foreign_key_name: 2})
         obj_from_query = await self._main_model.objects.aget(id=data['id'])
         self.assertIsInstance(obj_rel, self._relation_model)
+
+
+class TestPagination(TestCase):
+    @classmethod
+    def setUp(cls):
+        if platform == 'win32':
+            set_event_loop_policy(WindowsSelectorEventLoopPolicy())
+
+    async def test_pagination(self):
+        pass
