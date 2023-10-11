@@ -1,17 +1,15 @@
-from traceback import format_exc
 from copy import deepcopy
+from traceback import format_exc
 from collections.abc import Mapping
 from async_property import async_property, async_cached_property
 from asgiref.sync import sync_to_async
 from psycopg import AsyncConnection, OperationalError
 from django.db import connection
 from django.core.exceptions import ValidationError as DjangoValidationError
-from rest_framework.utils import html, model_meta, representation
+from rest_framework.utils import html, model_meta
 from rest_framework.serializers import (
-    ListSerializer, ModelSerializer, 
-    Serializer, SerializerMetaclass,
-    raise_errors_on_nested_writes,
-    as_serializer_error
+    ListSerializer, ModelSerializer, Serializer, SerializerMetaclass,
+    raise_errors_on_nested_writes, as_serializer_error
 )
 from rest_framework.utils.serializer_helpers import (
     BindingDict, BoundField, JSONBoundField, 
