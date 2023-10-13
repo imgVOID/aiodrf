@@ -1,3 +1,4 @@
+import asyncio
 from copy import deepcopy
 from traceback import format_exc
 from collections.abc import Mapping
@@ -6,6 +7,7 @@ from asgiref.sync import sync_to_async
 from psycopg import AsyncConnection, OperationalError
 from django.db import connection
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils.functional import cached_property
 from rest_framework.utils import html, model_meta
 from rest_framework.serializers import (
     ListSerializer, ModelSerializer, Serializer, SerializerMetaclass,
@@ -229,7 +231,10 @@ class SerializerAsync(Serializer, metaclass=SerializerMetaclass):
             elif hasattr(self, '_validated_data') and not getattr(self, '_errors', None):
                 self._data = await self.to_representation(self.validated_data)
             else:
-                self._data = await self.get_initial()
+                try:
+                    self._data = await self.get_initial()
+                except TypeError:
+                    self._data = await sync_to_async(self.get_initial)()
         return ReturnDict(self._data, serializer=self)
 
     @async_property
@@ -341,20 +346,167 @@ class ListSerializerAsync(ListSerializer):
         await self.update()
 
 
+class ListSerializerAsync(ListSerializer):
+    def __get_async(self, attr_name_str, is_thread_sensitive=True, is_property=False):
+        attr_sync = getattr(type(self).__base__.__base__, attr_name_str)
+        if is_property:
+            attr_sync = attr_sync.fget
+        return sync_to_async(attr_sync, thread_sensitive=is_thread_sensitive)
+
+    @cached_property
+    def fields(self):
+        fields = BindingDict(self)
+        fields_items = asyncio.run(self.__get_async('get_fields', False)(self)).items()
+        for key, value in fields_items:
+            fields[key] = value
+        return fields
+
+    @property
+    def data(self):
+        return asyncio.run(self.__get_async('data', True, True)(self))
+
+    @property
+    def errors(self):
+        ret = asyncio.run(sync_to_async(self.child.errors.fget)(self))
+        if isinstance(ret, list) and len(ret) == 1 and getattr(ret[0], 'code', None) == 'null':
+            # Edge case. Provide a more descriptive error than
+            # "this field may not be null", when no data is passed.
+            detail = ErrorDetail('No data provided', code='null')
+            ret = {api_settings.NON_FIELD_ERRORS_KEY: [detail]}
+        if isinstance(ret, dict):
+            return ReturnDict(ret, serializer=self)
+        return ReturnList(ret, serializer=self)
+
+    def is_valid(self, *args, raise_exception=False):
+        return asyncio.run(self.__get_async('is_valid', False)(
+            self, *args, raise_exception=raise_exception
+        ))
+    
+    @async_property
+    async def adata(self):
+        return await self.__get_async('data', True, True)(self)
+    
+    @async_property
+    async def avalidated_data(self):
+        return await self.__get_async('validated_data', False, True)(self)
+
+    @async_property
+    async def aerrors(self):
+        ret = await sync_to_async(self.child.errors.fget)(self)
+        if isinstance(ret, list) and len(ret) == 1 and getattr(ret[0], 'code', None) == 'null':
+            # Edge case. Provide a more descriptive error than
+            # "this field may not be null", when no data is passed.
+            detail = ErrorDetail('No data provided', code='null')
+            ret = {api_settings.NON_FIELD_ERRORS_KEY: [detail]}
+        if isinstance(ret, dict):
+            return ReturnDict(ret, serializer=self)
+        return ReturnList(ret, serializer=self)
+
+    async def ais_valid(self, *args, raise_exception=False):
+        return await self.__get_async('is_valid', False)(
+            self, *args, raise_exception=raise_exception
+    )
+
+    def save(self, **kwargs):
+        assert hasattr(self, '_errors'), (
+            'You must call `.is_valid()` before calling `.save()`.'
+        )
+
+        assert not self.errors, (
+            'You cannot call `.save()` on a serializer with invalid data.'
+        )
+
+        assert 'commit' not in kwargs, (
+            "'commit' is not a valid keyword argument to the 'save()' method. "
+            "If you need to access data before committing to the database then "
+            "inspect 'serializer.validated_data' instead. "
+            "You can also pass additional keyword arguments to 'save()' if you "
+            "need to set extra attributes on the saved model instance. "
+            "For example: 'serializer.save(owner=request.user)'.'"
+        )
+
+        assert not hasattr(self, '_data'), (
+            "You cannot call `.save()` after accessing `serializer.data`."
+            "If you need to access data before committing to the database then "
+            "inspect 'serializer.validated_data' instead. "
+        )
+
+        validated_data = {**self.validated_data, **kwargs}
+
+        if self.instance is not None:
+            self.instance = asyncio.run(self.update(self.instance, validated_data))
+            assert self.instance is not None, (
+                '`update()` did not return an object instance.'
+            )
+        else:
+            self.instance = asyncio.run(self.create(validated_data))
+            assert self.instance is not None, (
+                '`create()` did not return an object instance.'
+            )
+
+        return self.instance
+
+    async def asave(self, **kwargs):
+        assert hasattr(self, '_errors'), (
+            'You must call `.is_valid()` before calling `.save()`.'
+        )
+
+        assert not await self.aerrors, (
+            'You cannot call `.save()` on a serializer with invalid data.'
+        )
+
+        assert 'commit' not in kwargs, (
+            "'commit' is not a valid keyword argument to the 'save()' method. "
+            "If you need to access data before committing to the database then "
+            "inspect 'serializer.validated_data' instead. "
+            "You can also pass additional keyword arguments to 'save()' if you "
+            "need to set extra attributes on the saved model instance. "
+            "For example: 'serializer.save(owner=request.user)'.'"
+        )
+
+        assert not hasattr(self, '_data'), (
+            "You cannot call `.save()` after accessing `serializer.data`."
+            "If you need to access data before committing to the database then "
+            "inspect 'serializer.validated_data' instead. "
+        )
+
+        validated_data = {**await self.avalidated_data, **kwargs}
+
+        if self.instance is not None:
+            self.instance = await self.update(self.instance, validated_data)
+            assert self.instance is not None, (
+                '`update()` did not return an object instance.'
+            )
+        else:
+            self.instance = await self.create(validated_data)
+            assert self.instance is not None, (
+                '`create()` did not return an object instance.'
+            )
+
+        return self.instance
+    
+    async def create(self, validated_data):
+        return [await self.child.create(attrs) for attrs in validated_data]
+
+    async def acreate(self, validated_data):
+        return await self.child.acreate(validated_data)
+
+    async def update(self, instance, validated_data):
+        raise NotImplementedError(
+            "Serializers with many=True do not support multiple update by "
+            "default, only multiple create. For updates it is unclear how to "
+            "deal with insertions and deletions. If you need to support "
+            "multiple update, use a `ListSerializer` class and override "
+            "`.update()` so you can specify the behavior exactly."
+        )
+
+    async def aupdate(self, instance, validated_data):
+        await self.update()
+
+
 class ModelSerializerAsync(ModelSerializer):
     class Meta:
         list_serializer_class = ListSerializerAsync
-    
-    async def __aiter__(self):
-        try:
-            fields = await self.fields
-        except TypeError:
-            fields = self.fields
-        for field in fields.values():
-            yield await self[field.field_name]
-
-    async def __getitem__(self, key):
-        return await SerializerAsync.__getitem__(self, key)
     
     @classmethod
     def many_init(cls, *args, **kwargs):
@@ -385,30 +537,44 @@ class ModelSerializerAsync(ModelSerializer):
             return cls.Meta.list_serializer_class(*args, **list_kwargs)
         except AttributeError:
             return ListSerializerAsync(*args, **list_kwargs)
-    
-    @async_property
-    async def validated_data(self):
-        return await SerializerAsync.validated_data._fget(self)
 
-    @async_property
-    async def data(self):
-        return await SerializerAsync.data._fget(self)
+    def __get_async(self, attr_name_str, is_thread_sensitive=True, is_property=False):
+        attr_sync = getattr(type(self).__base__.__base__, attr_name_str)
+        if is_property:
+            attr_sync = attr_sync.fget
+        return sync_to_async(attr_sync, thread_sensitive=is_thread_sensitive)
 
-    @async_property
-    async def errors(self):
-        return await sync_to_async(ModelSerializerAsync.__base__.errors.fget)(self)
+    @cached_property
+    def fields(self):
+        fields = BindingDict(self)
+        fields_items = asyncio.run(self.__get_async('get_fields', False)(self)).items()
+        for key, value in fields_items:
+            fields[key] = value
+        return fields
 
-    async def is_valid(self, *args, raise_exception=False):
-        return await sync_to_async(ModelSerializerAsync.__base__.is_valid)(
+    @property
+    def validated_data(self):
+        return asyncio.run(self.__get_async('validated_data', False, True)(self))
+
+    @property
+    def data(self):
+        return asyncio.run(self.__get_async('data', True, True)(self))
+
+    @property
+    def errors(self):
+        return asyncio.run(self.__get_async('errors', True, True)(self))
+
+    def is_valid(self, *args, raise_exception=False):
+        return asyncio.run(self.__get_async('is_valid', False)(
             self, *args, raise_exception=raise_exception
-        )
+        ))
 
-    async def save(self, **kwargs):
+    def save(self, **kwargs):
         assert hasattr(self, '_errors'), (
             'You must call `.is_valid()` before calling `.save()`.'
         )
 
-        assert not await self.errors, (
+        assert not self.errors, (
             'You cannot call `.save()` on a serializer with invalid data.'
         )
 
@@ -427,7 +593,64 @@ class ModelSerializerAsync(ModelSerializer):
             "inspect 'serializer.validated_data' instead. "
         )
 
-        validated_data = {**await self.validated_data, **kwargs}
+        validated_data = {**self.validated_data, **kwargs}
+
+        if self.instance is not None:
+            self.instance = asyncio.run(self.update(self.instance, validated_data))
+            assert self.instance is not None, (
+                '`update()` did not return an object instance.'
+            )
+        else:
+            self.instance = asyncio.run(self.create(validated_data))
+            assert self.instance is not None, (
+                '`create()` did not return an object instance.'
+            )
+
+        return self.instance
+    
+    @async_property
+    async def adata(self):
+        return await self.__get_async('data', True, True)(self)
+    
+    @async_property
+    async def avalidated_data(self):
+        return await self.__get_async('validated_data', False, True)(self)
+
+    @async_property
+    async def aerrors(self):
+        return await self.__get_async('errors', True, True)(self)
+
+    async def ais_valid(self, *args, raise_exception=False):
+        return await self.__get_async('is_valid', False)(
+            self, *args, raise_exception=raise_exception
+    )
+
+    # Add async db connection possibilities
+    async def asave(self, **kwargs):
+        assert hasattr(self, '_errors'), (
+            'You must call `.is_valid()` before calling `.save()`.'
+        )
+
+        assert not await self.aerrors, (
+            'You cannot call `.save()` on a serializer with invalid data.'
+        )
+
+        assert 'commit' not in kwargs, (
+            "'commit' is not a valid keyword argument to the 'save()' method. "
+            "If you need to access data before committing to the database then "
+            "inspect 'serializer.validated_data' instead. "
+            "You can also pass additional keyword arguments to 'save()' if you "
+            "need to set extra attributes on the saved model instance. "
+            "For example: 'serializer.save(owner=request.user)'.'"
+        )
+
+        assert not hasattr(self, '_data'), (
+            "You cannot call `.save()` after accessing `serializer.data`."
+            "If you need to access data before committing to the database then "
+            "inspect 'serializer.validated_data' instead. "
+        )
+
+        validated_data = {**await self.avalidated_data, **kwargs}
 
         if self.instance is not None:
             self.instance = await self.update(self.instance, validated_data)

@@ -1,9 +1,4 @@
-"""
-Basic building blocks for generic class based views.
-
-We don't bind behaviour to http method handlers yet,
-which allows mixin classes to be composed in interesting ways.
-"""
+from asgiref.sync import sync_to_async
 from django.db.models.query import prefetch_related_objects
 
 from rest_framework import status
@@ -19,7 +14,7 @@ class CreateModelAsyncMixin(CreateModelMixin):
         await serializer.is_valid(raise_exception=True)
         await self.perform_create(serializer)
         headers = await self.get_success_headers(await serializer.data)
-        return Response(await serializer.dat, status=status.HTTP_201_CREATED, headers=headers)
+        return Response(await serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     async def perform_create(self, serializer):
         await serializer.asave()
@@ -33,7 +28,7 @@ class CreateModelAsyncMixin(CreateModelMixin):
 
 class ListModelAsyncMixin(ListModelMixin):
     async def list(self, request, *args, **kwargs):
-        queryset = self.filter_queryset(self.get_queryset())
+        queryset = await self.filter_queryset(await self.get_queryset())
 
         page = await self.paginate_queryset(queryset)
         if page is not None:
@@ -62,7 +57,7 @@ class UpdateModelAsyncMixin(UpdateModelMixin):
         queryset = await self.filter_queryset(await self.get_queryset())
         if queryset._prefetch_related_lookups:
             instance._prefetched_objects_cache = {}
-            prefetch_related_objects([instance], *queryset._prefetch_related_lookups)
+            await sync_to_async(prefetch_related_objects)([instance], *queryset._prefetch_related_lookups)
 
         return Response(await serializer.data)
 

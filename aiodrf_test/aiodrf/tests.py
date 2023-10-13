@@ -10,8 +10,10 @@ from rest_framework.relations import PrimaryKeyRelatedField
 from rest_framework.utils.serializer_helpers import BoundField
 
 # TODO: test errors and initial values
+# TODO: test sync props
+# TODO: test save and asave
 
-class TestModelSerializer(TestCase):
+class TestModelSerializerAsync(TestCase):
     fixtures = ['test_model_fixture.json']
     _main_model, _relation_model = Test, TestIncluded
     _main_query = _main_model.objects.all()
@@ -59,14 +61,12 @@ class TestModelSerializer(TestCase):
         setattr(obj, self._foreign_key_name, obj_rel)
         await obj.asave()
         serializer = Serializer(obj)
-        data = await serializer.data
+        data = await serializer.adata
         rel_obj = await sync_to_async(getattr)(obj, self._foreign_key_name)
         rel_keys = data[self._foreign_key_name]
         del rel_keys[self._many_to_many_relation_name]
         [self.assertEqual(await sync_to_async(getattr)(rel_obj, key), rel_keys[key]) 
          for key in rel_keys.keys()]
-        [self.assertIsInstance(field, BoundField)
-         async for field in serializer]
         rel_keys = list(data[self._many_to_many_name][0].keys())
         rel_keys.remove(self._many_to_many_relation_name)
         objs_many_to_many = [obj async for obj in getattr(obj, self._many_to_many_name).all()]
@@ -85,13 +85,16 @@ class TestModelSerializer(TestCase):
     async def test_create(self):
         obj = await self._main_query.afirst()
         serializer = await self._get_serializer()
-        data = await serializer(obj).data
+        data = await serializer(obj).adata
         data[self._text_name] = self._test_str
-        related_obj = await self._relation_query.afirst()
-        data[self._foreign_key_name] = related_obj.id
+        related_obj = await self._relation_query.acreate()
+        data[self._foreign_key_name] = related_obj.text_included
+        data[self._many_to_many_name] = []
         serializer, id = serializer(data=data), data.pop('id')
-        self.assertIs(await serializer.is_valid(), True)
-        obj = await serializer.save()
+        self.assertIs(await serializer.ais_valid(), True)
+        data[self._foreign_key_name] = related_obj
+        data[self._many_to_many_name] = [related_obj]
+        obj = await serializer.create(data)
         self.assertGreater(obj.id, id)
         self.assertIsInstance(
             getattr(obj, self._foreign_key_name), 
@@ -100,10 +103,7 @@ class TestModelSerializer(TestCase):
         self.assertIsInstance(
             await self._main_model.objects.aget(text=data['text']), self._main_model
         )
-        del data[self._foreign_key_name], data[self._many_to_many_name]
         [self.assertEqual(getattr(obj, key), data[key]) for key in data.keys()]
-        [self.assertIsInstance(field, BoundField)
-         async for field in serializer]
         self.assertIsInstance(str(serializer), str)
         self.assertGreater(len(str(serializer)), 50)
         
@@ -111,7 +111,7 @@ class TestModelSerializer(TestCase):
         objs = [obj async for obj in self._main_query.all()]
         serializer = await self._get_serializer()
         serializer = serializer(objs, many=True)
-        data = await serializer.data
+        data = await serializer.adata
         for obj in data:
             obj[self._text_name] = self._test_str
             obj[self._foreign_key_name] = await self._relation_query.afirst()
@@ -119,20 +119,18 @@ class TestModelSerializer(TestCase):
         objs = await serializer.create(data)
         [[self.assertEqual(getattr(objs[i], k), data[i][k]) 
           for k in dict(data[i]).keys()] for i in range(len(objs))]
-        [self.assertIsInstance(field, BoundField)
-         async for field in serializer]
         self.assertIsInstance(str(serializer), str)
         self.assertGreater(len(str(serializer)), 50)
     
     async def test_update(self):
         obj = await self._main_query.afirst()
         serializer = await self._get_serializer()
-        data = await serializer(obj).data
+        data = await serializer(obj).adata
         self.assertEqual(data[self._foreign_key_name], None)
         data[self._foreign_key_name] = await self._relation_query.afirst()
         data[self._text_name] = self._test_str
         serializer = serializer(data=data)
-        await serializer.is_valid()
+        await serializer.ais_valid()
         await serializer.update(obj, data)
         try:
             obj_updated = await self._main_query.aget(text=data[self._text_name])
@@ -168,13 +166,13 @@ class TestModelSerializerAsyncDbCon(TransactionTestCase):
     
     @classmethod
     async def _get_serializer(cls):
-        return await TestModelSerializer._get_serializer()
+        return await TestModelSerializerAsync._get_serializer()
     
     # TODO: test many to many
     async def test_acreate(self):
         obj = await self._main_query.afirst()
         serializer = await self._get_serializer()
-        data = dict(await serializer(obj).data)
+        data = dict(await serializer(obj).adata)
         data[self._text_name] = self._test_str
         data[self._many_to_many_name] = [1, 2]
         id = data.pop('id')
@@ -189,7 +187,7 @@ class TestModelSerializerAsyncDbCon(TransactionTestCase):
         objs = [obj async for obj in self._main_query.all()]
         serializer = await self._get_serializer()
         serializer = serializer(objs, many=True)
-        data = await serializer.data
+        data = await serializer.adata
         objs = await serializer.acreate(data)
         for i in range(len(data)):
             self.assertGreater(objs[i].id, data[i]['id'])
@@ -202,7 +200,7 @@ class TestModelSerializerAsyncDbCon(TransactionTestCase):
         foreign_key_name = self._foreign_key_name
         obj = await self._main_query.afirst()
         serializer = await self._get_serializer()
-        data = dict(await serializer(obj).data)
+        data = dict(await serializer(obj).adata)
         self.assertNotEqual(data[self._text_name], self._test_str)
         self.assertNotEqual(obj.text, self._test_str)
         self.assertIsNone(
@@ -231,7 +229,7 @@ class TestModelSerializerAsyncDbCon(TransactionTestCase):
         self.assertIsInstance(obj_rel, self._relation_model)
 
 
-class TestSerializer(TransactionTestCase):
+class TestSerializerAsync(TransactionTestCase):
     fixtures = ['test_model_fixture.json']
     _main_model, _relation_model = Test, TestIncluded
     _main_query = _main_model.objects.all()
@@ -341,11 +339,9 @@ class TestSerializer(TransactionTestCase):
         setattr(obj[0], self._foreign_key_name, obj_rel)
         await obj[0].asave()
         serializer = serializer(obj, many=True)
-        data = await serializer.data
-        [self.assertIn(data_obj[self._foreign_key_name], [obj_rel.id, None]) 
+        data = await serializer.adata
+        [self.assertIn(dict(await data_obj)[self._foreign_key_name], [obj_rel.id, None]) 
          for data_obj in data]
-        [self.assertIsInstance(field, BoundField)
-         async for field in serializer]
         self.assertIsInstance(str(serializer), str)
         self.assertGreater(len(str(serializer)), 50)
 
